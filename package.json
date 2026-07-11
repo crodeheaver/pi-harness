@@ -1,0 +1,46 @@
+{
+  "name": "pi-audited-harness",
+  "version": "0.2.0",
+  "description": "A small, auditable safety and workflow layer for the Pi coding agent",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-coding-agent",
+    "coding-agent",
+    "safety"
+  ],
+  "files": [
+    "extensions",
+    "skills",
+    "prompts",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/policy.ts",
+      "./extensions/structured-question.ts",
+      "./extensions/presets.ts",
+      "./extensions/status.ts",
+      "./extensions/web-fetch.ts",
+      "./extensions/tasks.ts"
+    ],
+    "skills": ["./skills"],
+    "prompts": ["./prompts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test tests/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}
