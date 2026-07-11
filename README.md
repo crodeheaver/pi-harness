@@ -10,6 +10,7 @@ A small, auditable safety and workflow layer for [Pi](https://pi.dev). It adds p
 - **Anthropic subscription status** — shows whether the selected Anthropic model uses Pi's stored Pro/Max OAuth and can fail closed instead of using metered API credentials.
 - **Subagent policy bridge** — applies mode, concurrency, turn, model-routing, and approval guardrails when the optional `@gotgenes/pi-subagents` engine is installed.
 - **Harness modes** — `/mode inspect|plan|default|permissive|yolo|isolated`.
+- **Task profiles** — `/profile [name]` hot-swaps one trusted project profile from `./pi`.
 - **`ask_user` tool** — one structured question with an optional free-form answer.
 - **Status** — footer indicators for the active mode and policy approvals/blocks.
 - **Secure web fetch** — public HTTP(S) text retrieval with redirect, SSRF, timeout, content-type, and size guards; never sends cookies or credentials.
@@ -38,6 +39,7 @@ pi -e ./extensions/policy.ts \
   -e ./extensions/subagent-bridge.ts \
   -e ./extensions/structured-question.ts \
   -e ./extensions/presets.ts \
+  -e ./extensions/profiles.ts \
   -e ./extensions/status.ts \
   -e ./extensions/web-fetch.ts \
   -e ./extensions/tasks.ts \
@@ -97,6 +99,36 @@ Plan and approve a change:
 ```
 
 The review command displays the plan and requires an explicit **Approve and execute** decision before restoring default mode and asking Pi to implement it.
+
+## Task profiles
+
+Create named profile folders directly under `./pi`:
+
+```text
+pi/
+└── review/
+    ├── settings.json
+    ├── APPEND_SYSTEM.md
+    ├── skills/
+    ├── prompts/
+    └── themes/
+```
+
+Load or switch profiles with `/profile review`. Calling `/profile` without a name opens a selector; `/profile --clear` unloads the active profile. Switching triggers Pi's normal resource reload, so skills, prompt templates, and themes from the previous profile are removed. The selection is stored in the current session and restored on resume. Profiles only load for trusted projects.
+
+Profile `settings.json` accepts Pi's `defaultProvider`, `defaultModel`, `defaultThinkingLevel`, and `theme` fields, plus `tools` and `instructions`. Its `skills`, `prompts`, and `themes` arrays add paths relative to the profile folder; the conventional directories above are loaded automatically. `APPEND_SYSTEM.md` is appended to the system prompt. Example:
+
+```json
+{
+  "defaultProvider": "anthropic",
+  "defaultModel": "claude-sonnet-4-5",
+  "defaultThinkingLevel": "high",
+  "tools": ["read", "grep", "find", "ls"],
+  "instructions": "Review changes without modifying the workspace."
+}
+```
+
+Profile settings are overlays. When a profile is switched or cleared, model, thinking level, tools, and theme are first restored to the state captured before the first profile was loaded. Profile-local extensions and packages are not loaded dynamically; keep executable extensions in normal reviewed Pi package or project settings.
 
 Isolated mode accepts a positive `audited-harness:sandbox-status` event from a sandbox integration. For externally established Docker, VM, WSL, Gondolin, or OpenShell boundaries, `PI_HARNESS_ISOLATED=1` remains an explicit assertion. It **does not create isolation**.
 

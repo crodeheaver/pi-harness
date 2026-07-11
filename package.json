@@ -24,6 +24,7 @@
       "./extensions/subagent-bridge.ts",
       "./extensions/structured-question.ts",
       "./extensions/presets.ts",
+      "./extensions/profiles.ts",
       "./extensions/status.ts",
       "./extensions/web-fetch.ts",
       "./extensions/tasks.ts"
