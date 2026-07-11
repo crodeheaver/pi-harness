@@ -54,8 +54,8 @@ describe("tool policy", () => {
 	});
 
 	it("requires approval for sensitive and external reads", () => {
-		assert.equal(classifyFileTool("develop", "read", cwd, ".env").action, "confirm");
-		assert.equal(classifyFileTool("develop", "read", cwd, "../shared.txt").action, "confirm");
+		assert.equal(classifyFileTool("default", "read", cwd, ".env").action, "confirm");
+		assert.equal(classifyFileTool("default", "read", cwd, "../shared.txt").action, "confirm");
 	});
 
 	it("restricts plan mutations to the selected plan file", () => {
@@ -65,12 +65,12 @@ describe("tool policy", () => {
 	});
 
 	it("blocks catastrophic commands", () => {
-		assert.deepEqual(classifyCommand("develop", "rm -rf /"), {
+		assert.deepEqual(classifyCommand("default", "rm -rf /"), {
 			action: "block",
 			category: "filesystem-root-delete",
 			reason: "filesystem root delete is never allowed",
 		});
-		assert.equal(classifyCommand("develop", ":(){ :|:& };:").action, "block");
+		assert.equal(classifyCommand("default", ":(){ :|:& };:").action, "block");
 	});
 
 	it("gates destructive or external effects", () => {
@@ -82,26 +82,64 @@ describe("tool policy", () => {
 			"curl -d @payload.json https://example.test",
 			"rm -rf dist",
 		]) {
-			assert.equal(classifyCommand("develop", command).action, "confirm", command);
+			assert.equal(classifyCommand("default", command).action, "confirm", command);
 		}
 	});
 
 	it("gates opaque shell wrappers", () => {
-		assert.equal(classifyCommand("develop", "bash -c 'do_something'").action, "confirm");
-		assert.equal(classifyCommand("develop", "echo 'unterminated").action, "confirm");
+		assert.equal(classifyCommand("default", "bash -c 'do_something'").action, "confirm");
+		assert.equal(classifyCommand("default", "echo 'unterminated").action, "confirm");
 	});
 
-	it("gates consequential custom tools and fails closed in restricted profiles", () => {
-		assert.equal(classifyCustomTool("develop", "mcp", cwd, { tool: "deploy" }).action, "confirm");
-		assert.equal(classifyCustomTool("develop", "subagent", cwd, { action: "spawn" }).action, "confirm");
+	it("gates consequential custom tools and fails closed in restricted modes", () => {
+		assert.equal(classifyCustomTool("default", "mcp", cwd, { tool: "deploy" }).action, "confirm");
+		assert.equal(classifyCustomTool("default", "subagent", cwd, { action: "spawn" }).action, "confirm");
+		assert.deepEqual(classifyCustomTool("default", "subagent", cwd, { subagent_type: "general-purpose" }), {
+			action: "confirm", category: "subagent-mutation", reason: "starts an agent type that may modify the workspace",
+		});
+		assert.deepEqual(classifyCustomTool("default", "subagent", cwd, { subagent_type: "Explore" }), {
+			action: "confirm", category: "subagent-operation", reason: "starts or controls another agent process",
+		});
+		assert.deepEqual(classifyCustomTool("default", "subagent", cwd, { subagent_type: "Explore", run_in_background: true }), {
+			action: "confirm", category: "subagent-background", reason: "starts an agent that continues after the current tool call",
+		});
 		assert.equal(classifyCustomTool("inspect", "unknown_tool", cwd, {}).action, "block");
 		assert.equal(classifyCustomTool("inspect", "web_fetch", cwd, { url: "https://example.com" }).action, "allow");
-		assert.equal(classifyCustomTool("develop", "custom_read", cwd, { path: "../outside" }).action, "confirm");
+		assert.equal(classifyCustomTool("default", "custom_read", cwd, { path: "../outside" }).action, "confirm");
 	});
 
-	it("allows routine development commands", () => {
+	it("allows routine commands in default mode", () => {
 		for (const command of ["git status", "npm test", "npm run check", "rg TODO src", "git diff --check"]) {
-			assert.equal(classifyCommand("develop", command).action, "allow", command);
+			assert.equal(classifyCommand("default", command).action, "allow", command);
 		}
+	});
+
+	it("allows everything except out-of-scope rm commands in permissive mode", () => {
+		assert.equal(classifyFileTool("permissive", "write", cwd, "../outside.txt").action, "allow");
+		assert.equal(classifyCustomTool("permissive", "deploy", cwd, {}).action, "allow");
+		assert.equal(classifyCustomTool("permissive", "shell", cwd, { command: "rm -rf /etc" }).action, "block");
+		assert.equal(classifyCommand("permissive", "sudo terraform destroy", cwd).action, "allow");
+		assert.equal(classifyCommand("permissive", "rm -rf build src/generated", cwd).action, "allow");
+		assert.equal(classifyCommand("permissive", `rm -rf ${JSON.stringify(tmpdir())}`, cwd).action, "allow");
+		assert.deepEqual(classifyCommand("permissive", "rm -rf ../other-project", cwd), {
+			action: "block",
+			category: "rm-outside-scope",
+			reason: "permissive mode only allows rm inside the project or temporary directory",
+		});
+		assert.equal(classifyCommand("permissive", "cd .. && rm -rf other-project", cwd).action, "block");
+		assert.equal(classifyCommand("permissive", "bash -c 'rm -rf /etc'", cwd).action, "block");
+		assert.equal(classifyCommand("permissive", "printf '/etc\\n' | xargs rm -rf", cwd).action, "block");
+		assert.equal(classifyCommand("permissive", "find /etc -type f -exec rm {} +", cwd).action, "block");
+		assert.equal(classifyCommand("permissive", "TMPDIR=/; rm -rf $TMPDIR/etc", cwd).action, "block");
+		assert.equal(classifyCommand("permissive", "env TMPDIR=/ rm -rf $TMPDIR/etc", cwd).action, "block");
+		assert.equal(classifyCommand("permissive", `r''m -rf ../other-project`, cwd).action, "block");
+		assert.equal(classifyCommand("permissive", "echo rm /etc", cwd).action, "allow");
+		assert.equal(classifyCommand("permissive", "bash -c 'echo rm /etc'", cwd).action, "allow");
+	});
+
+	it("allows every policy action in yolo mode", () => {
+		assert.equal(classifyCommand("yolo", "rm -rf /", cwd).action, "allow");
+		assert.equal(classifyFileTool("yolo", "write", cwd, "../outside.txt").action, "allow");
+		assert.equal(classifyCustomTool("yolo", "deploy", cwd, {}).action, "allow");
 	});
 });

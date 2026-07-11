@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { classifyCommand, classifyCustomTool, classifyFileTool, type Decision, type HarnessProfile } from "./policy-rules.js";
+import { classifyCommand, classifyCustomTool, classifyFileTool, isHarnessMode, type Decision, type HarnessMode } from "./policy-rules.js";
 
 interface AuditEvent {
 	outcome: "approved" | "blocked";
@@ -9,25 +9,25 @@ interface AuditEvent {
 	timestamp: number;
 }
 
-interface ProfileState {
-	name: HarnessProfile;
+interface ModeState {
+	name: HarnessMode;
 	planPath?: string;
 }
 
 export default function policyExtension(pi: ExtensionAPI) {
-	let profile: ProfileState = { name: "develop" };
+	let mode: ModeState = { name: "default" };
 	const sessionApprovals = new Set<string>();
 
-	pi.events.on("audited-harness:profile", (value: unknown) => {
-		if (typeof value === "string" && ["inspect", "plan", "develop", "isolated"].includes(value)) {
-			profile = { name: value as HarnessProfile };
+	function updateMode(value: unknown) {
+		if (isHarnessMode(value)) {
+			mode = { name: value };
 			return;
 		}
-		const next = value as Partial<ProfileState> | undefined;
-		if (next && ["inspect", "plan", "develop", "isolated"].includes(String(next.name))) {
-			profile = { name: next.name as HarnessProfile, planPath: next.planPath };
-		}
-	});
+		const next = value as Partial<ModeState> | undefined;
+		if (next && isHarnessMode(next.name)) mode = { name: next.name, planPath: next.planPath };
+	}
+
+	pi.events.on("audited-harness:mode", updateMode);
 
 	function audit(outcome: AuditEvent["outcome"], category: string, tool: string, scope?: AuditEvent["scope"]) {
 		const event: AuditEvent = { outcome, category, tool, scope, timestamp: Date.now() };
@@ -83,17 +83,17 @@ export default function policyExtension(pi: ExtensionAPI) {
 	pi.on("tool_call", async (event, ctx) => {
 		if (event.toolName === "bash") {
 			const command = String((event.input as { command?: unknown }).command ?? "");
-			return enforce(classifyCommand(profile.name, command), "bash", command, ctx);
+			return enforce(classifyCommand(mode.name, command, ctx.cwd), "bash", command, ctx);
 		}
 		if (["read", "write", "edit", "grep", "find", "ls"].includes(event.toolName)) {
 			const path = String((event.input as { path?: unknown }).path ?? ".");
 			return enforce(
-				classifyFileTool(profile.name, event.toolName, ctx.cwd, path, profile.planPath),
+				classifyFileTool(mode.name, event.toolName, ctx.cwd, path, mode.planPath),
 				event.toolName,
 				path,
 				ctx,
 			);
 		}
-		return enforce(classifyCustomTool(profile.name, event.toolName, ctx.cwd, event.input), event.toolName, event.toolName, ctx);
+		return enforce(classifyCustomTool(mode.name, event.toolName, ctx.cwd, event.input), event.toolName, event.toolName, ctx);
 	});
 }

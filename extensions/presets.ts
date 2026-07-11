@@ -1,11 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { relative, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { HarnessProfile } from "./policy-rules.js";
-import { protectedWriteCategory } from "./policy-rules.js";
+import { HARNESS_MODES, isHarnessMode, protectedWriteCategory, type HarnessMode } from "./policy-rules.js";
 
-interface ProfileState {
-	name: HarnessProfile;
+interface ModeState {
+	name: HarnessMode;
 	planPath?: string;
 }
 
@@ -14,37 +13,41 @@ const RESTRICTED_TOOLS: Record<"inspect" | "plan", Set<string>> = {
 	plan: new Set(["read", "grep", "find", "ls", "write", "edit", "ask_user", "web_fetch", "task"]),
 };
 
-const INSTRUCTIONS: Record<HarnessProfile, string> = {
+const INSTRUCTIONS: Record<HarnessMode, string> = {
 	inspect: [
-		"You are in INSPECT profile. Do not modify files or execute shell commands.",
+		"You are in INSPECT mode. Do not modify files or execute shell commands.",
 		"Explore with read-only tools, answer from evidence, and clearly distinguish findings from recommendations.",
 	].join("\n"),
 	plan: [
-		"You are in PLAN profile. Explore safely and write only to the selected plan file.",
+		"You are in PLAN mode. Explore safely and write only to the selected plan file.",
 		"Do not implement the plan until the user approves it with /harness-plan-review.",
 	].join("\n"),
-	develop: [
-		"You are in DEVELOP profile. Make focused workspace changes and validate them with the project's native checks.",
+	default: [
+		"You are in DEFAULT mode. Make focused workspace changes and validate them with the project's native checks.",
 		"Inspect before editing, keep scope proportional, review the resulting diff, and report validation evidence and residual risks.",
 	].join("\n"),
+	permissive: [
+		"You are in PERMISSIVE mode. Harness approvals and file protections are disabled.",
+		"Shell rm commands remain limited to the current project and temporary directory.",
+	].join("\n"),
+	yolo: [
+		"You are in YOLO mode. Harness policy gates are disabled; proceed without harness approvals or blocks.",
+		"Follow the user's request directly while accurately reporting actions and results.",
+	].join("\n"),
 	isolated: [
-		"You are in ISOLATED profile inside an externally managed containment boundary.",
+		"You are in ISOLATED mode inside an externally managed containment boundary.",
 		"You may work autonomously within the mounted workspace, but still minimize credentials, network access, and irreversible external effects.",
 	].join("\n"),
 };
 
-function isProfile(value: unknown): value is HarnessProfile {
-	return value === "inspect" || value === "plan" || value === "develop" || value === "isolated";
-}
-
 export default function presetsExtension(pi: ExtensionAPI) {
-	let state: ProfileState = { name: "develop" };
-	let developTools: string[] = [];
+	let state: ModeState = { name: "default" };
+	let configuredTools: string[] = [];
 	let sandboxReady = false;
 	let sandboxLabel = "";
 
-	pi.registerFlag("harness-profile", {
-		description: "Execution profile: inspect, plan, develop, or isolated",
+	pi.registerFlag("harness-mode", {
+		description: `Harness mode: ${HARNESS_MODES.join(", ")}`,
 		type: "string",
 	});
 
@@ -55,18 +58,20 @@ export default function presetsExtension(pi: ExtensionAPI) {
 	});
 
 	function updateStatus(ctx: ExtensionContext) {
-		const color = state.name === "inspect" || state.name === "plan" ? "warning" : state.name === "isolated" ? "success" : "accent";
+		const color = state.name === "inspect" || state.name === "plan" || state.name === "permissive"
+			? "warning"
+			: state.name === "isolated" ? "success" : state.name === "yolo" ? "error" : "accent";
 		const suffix = state.name === "plan" && state.planPath ? `:${relative(ctx.cwd, state.planPath)}` : "";
-		ctx.ui.setStatus("audited-harness:profile", ctx.ui.theme.fg(color, `profile:${state.name}${suffix}`));
+		ctx.ui.setStatus("audited-harness:mode", ctx.ui.theme.fg(color, `mode:${state.name}${suffix}`));
 	}
 
 	function persist() {
-		pi.appendEntry("audited-harness:profile", state);
+		pi.appendEntry("audited-harness:mode", state);
 	}
 
 	function currentConfiguredTools(): string[] {
 		const available = new Set(pi.getAllTools().map((tool) => tool.name));
-		return developTools.filter((name) => available.has(name));
+		return configuredTools.filter((name) => available.has(name));
 	}
 
 	function enforceRestrictedToolSet() {
@@ -75,51 +80,48 @@ export default function presetsExtension(pi: ExtensionAPI) {
 		pi.setActiveTools(pi.getAllTools().map((tool) => tool.name).filter((name) => allowed.has(name)));
 	}
 
-	function activate(next: HarnessProfile, ctx: ExtensionContext, options: { persist?: boolean; planPath?: string } = {}): boolean {
+	function activate(next: HarnessMode, ctx: ExtensionContext, options: { persist?: boolean; planPath?: string } = {}): boolean {
 		if (next === "isolated" && !sandboxReady && process.env.PI_HARNESS_ISOLATED !== "1") {
-			if (ctx.hasUI) ctx.ui.notify("Isolated profile requires an active sandbox integration or an externally established boundary", "error");
+			if (ctx.hasUI) ctx.ui.notify("Isolated mode requires an active sandbox integration or an externally established boundary", "error");
 			return false;
 		}
-		if ((state.name === "develop" || state.name === "isolated") && (next === "inspect" || next === "plan")) {
-			developTools = pi.getActiveTools();
+		if (state.name !== "inspect" && state.name !== "plan" && (next === "inspect" || next === "plan")) {
+			configuredTools = pi.getActiveTools();
 		}
 		state = { name: next, planPath: next === "plan" ? options.planPath ?? state.planPath : undefined };
-		if (next === "inspect" || next === "plan") {
-			enforceRestrictedToolSet();
-		} else {
-			pi.setActiveTools(currentConfiguredTools());
-		}
-		pi.events.emit("audited-harness:profile", state);
+		if (next === "inspect" || next === "plan") enforceRestrictedToolSet();
+		else pi.setActiveTools(currentConfiguredTools());
+		pi.events.emit("audited-harness:mode", state);
 		updateStatus(ctx);
 		if (options.persist !== false) persist();
 		return true;
 	}
 
-	pi.registerCommand("harness-profile", {
-		description: "Switch execution profile: inspect, plan, develop, or isolated",
+	pi.registerCommand("mode", {
+		description: `Switch harness mode: ${HARNESS_MODES.join(", ")}`,
 		getArgumentCompletions(prefix) {
-			const items = (["inspect", "plan", "develop", "isolated"] as HarnessProfile[])
+			const items = HARNESS_MODES
 				.filter((name) => name.startsWith(prefix))
 				.map((name) => ({ value: name, label: name }));
 			return items.length ? items : null;
 		},
 		async handler(args, ctx) {
 			let selected = args.trim();
-			if (!selected && ctx.hasUI) selected = (await ctx.ui.select("Execution profile", ["inspect", "plan", "develop", "isolated"])) ?? "";
-			if (!isProfile(selected)) {
-				ctx.ui.notify("Usage: /harness-profile inspect|plan|develop|isolated", "warning");
+			if (!selected && ctx.hasUI) selected = (await ctx.ui.select("Harness mode", [...HARNESS_MODES])) ?? "";
+			if (!isHarnessMode(selected)) {
+				ctx.ui.notify(`Usage: /mode ${HARNESS_MODES.join("|")}`, "warning");
 				return;
 			}
 			if (selected === "plan") {
 				ctx.ui.notify("Use /harness-plan [path] to select a protected plan file", "warning");
 				return;
 			}
-			if (activate(selected, ctx)) ctx.ui.notify(`Harness profile changed to ${selected}`, "info");
+			if (activate(selected, ctx)) ctx.ui.notify(`Harness mode changed to ${selected}`, "info");
 		},
 	});
 
 	pi.registerCommand("harness-plan", {
-		description: "Enter plan profile with writes restricted to one plan file",
+		description: "Enter plan mode with writes restricted to one plan file",
 		async handler(args, ctx) {
 			const requested = args.trim() || ".pi/harness-plan.md";
 			const planPath = resolve(ctx.cwd, requested.startsWith("@") ? requested.slice(1) : requested);
@@ -128,7 +130,7 @@ export default function presetsExtension(pi: ExtensionAPI) {
 				ctx.ui.notify(`Unsafe plan path: ${category.replaceAll("-", " ")}`, "error");
 				return;
 			}
-			if (activate("plan", ctx, { planPath })) ctx.ui.notify(`Plan profile active; only ${relative(ctx.cwd, planPath)} may be edited`, "info");
+			if (activate("plan", ctx, { planPath })) ctx.ui.notify(`Plan mode active; only ${relative(ctx.cwd, planPath)} may be edited`, "info");
 		},
 	});
 
@@ -148,28 +150,34 @@ export default function presetsExtension(pi: ExtensionAPI) {
 			const choice = await ctx.ui.select("Plan decision", ["Approve and execute", "Keep planning", "Cancel plan"]);
 			if (choice === "Approve and execute") {
 				const approvedPath = state.planPath;
-				activate("develop", ctx);
+				activate("default", ctx);
 				pi.appendEntry("audited-harness:plan-approval", { path: approvedPath, timestamp: Date.now() });
 				pi.sendUserMessage(`Execute the approved plan in ${relative(ctx.cwd, approvedPath)}. Validate each completed change.`);
 			} else if (choice === "Cancel plan") {
-				activate("develop", ctx);
-				ctx.ui.notify("Plan cancelled; develop profile restored", "info");
+				activate("default", ctx);
+				ctx.ui.notify("Plan cancelled; default mode restored", "info");
 			}
 		},
 	});
 
 	pi.on("session_start", (_event, ctx) => {
-		developTools = pi.getActiveTools();
+		configuredTools = pi.getActiveTools();
 		pi.events.emit("audited-harness:sandbox-status-request", {
 			respond: (status: unknown) => pi.events.emit("audited-harness:sandbox-status", status),
 		});
-		const flag = pi.getFlag("harness-profile");
-		let restored: ProfileState | undefined;
+		const flag = pi.getFlag("harness-mode");
+		let restored: ModeState | undefined;
 		for (const entry of ctx.sessionManager.getEntries()) {
-			if (entry.type === "custom" && entry.customType === "audited-harness:profile") restored = entry.data as ProfileState;
+			if (entry.type !== "custom") continue;
+			if (entry.customType === "audited-harness:mode") restored = entry.data as ModeState;
+			if (entry.customType === "audited-harness:profile") {
+				const legacy = entry.data as { name?: unknown; planPath?: string };
+				if (legacy.name === "develop") restored = { name: "default", planPath: legacy.planPath };
+				else if (isHarnessMode(legacy.name)) restored = { name: legacy.name, planPath: legacy.planPath };
+			}
 		}
-		const requested = isProfile(flag) ? { name: flag } : restored && isProfile(restored.name) ? restored : { name: "develop" as const };
-		if (!activate(requested.name, ctx, { persist: false, planPath: requested.planPath })) activate("develop", ctx, { persist: false });
+		const requested = isHarnessMode(flag) ? { name: flag } : restored && isHarnessMode(restored.name) ? restored : { name: "default" as const };
+		if (!activate(requested.name, ctx, { persist: false, planPath: requested.planPath })) activate("default", ctx, { persist: false });
 		if (state.name === "isolated" && sandboxReady && ctx.hasUI) ctx.ui.notify(`Isolation verified by ${sandboxLabel}`, "info");
 	});
 
@@ -178,7 +186,7 @@ export default function presetsExtension(pi: ExtensionAPI) {
 	pi.on("before_agent_start", (event) => {
 		enforceRestrictedToolSet();
 		return {
-			systemPrompt: `${event.systemPrompt}\n\n## Active harness profile\n${INSTRUCTIONS[state.name]}${state.planPath ? `\nSelected plan file: ${state.planPath}` : ""}`,
+			systemPrompt: `${event.systemPrompt}\n\n## Active harness mode\n${INSTRUCTIONS[state.name]}${state.planPath ? `\nSelected plan file: ${state.planPath}` : ""}`,
 		};
 	});
 }
