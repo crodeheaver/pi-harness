@@ -28,7 +28,8 @@
       "./extensions/status.ts",
       "./extensions/web-fetch.ts",
       "./extensions/tasks.ts",
-      "./extensions/memory.ts"
+      "./extensions/memory.ts",
+      "./extensions/subagents.ts"
     ],
     "skills": ["./skills"],
     "prompts": ["./prompts"]

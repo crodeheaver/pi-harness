@@ -16,6 +16,7 @@ A small, auditable safety and workflow layer for [Pi](https://pi.dev). It adds p
 - **Secure web fetch** — public HTTP(S) text retrieval with redirect, SSRF, timeout, content-type, and size guards; never sends cookies or credentials.
 - **Task ledger** — a compact, branch-aware task tool and widget for genuinely multi-step work.
 - **Auto-memory** — Claude Code–style persistent project memory: durable context is saved to `.pi/memory/` as Markdown, the head of `MEMORY.md` is injected into the system prompt each turn, and the agent proactively saves facts worth keeping. Manage it with `/memory`.
+- **Sub-agents** — Claude Code–style sub-agent framework: dispatch isolated, specialized agents (`general-purpose`, `Explore`, `Plan`, or custom `.pi/agents/*.md` definitions) that run in their own context and return only a summary; foreground, background (`run_in_background`), fork (`inherit_context`), resume, and steer. Every sub-agent tool call honors the harness safety policy. Manage with `/agents`.
 - **Plan approval** — plan mode restricts writes to one selected plan file until explicit review and approval.
 
 ### Skills
@@ -241,6 +242,63 @@ Claude Code–style persistent project memory, defaulting to the project's `.pi/
 - **The `memory` tool** — `save` (append, or `append=false` to curate after `read`), `read`, `list`, and `delete`. Writes are confined to the memory directory and the policy treats the tool as a first-party harness tool (trusted, but blocked in `inspect`/`plan`).
 - **`/memory` command** — `status` (default), `edit [file]`, `list`, `on`, `off`.
 - **Defaults & overrides** — auto-memory is on by default. Disable with `PI_HARNESS_AUTO_MEMORY=0` (alias `PI_HARNESS_DISABLE_AUTO_MEMORY=1`) or `/memory off` for the session. Point memory elsewhere with `PI_HARNESS_MEMORY_DIR` (absolute, `~/`, or project-relative). Project-local memory (the default directory) loads only for trusted projects, like other `.pi/` resources; an explicit `PI_HARNESS_MEMORY_DIR` is an opt-in that bypasses the trust gate.
+
+## Sub-agents
+
+Claude Code–style sub-agents: the parent agent can dispatch a **sub-agent** — a specialized agent
+running in its own isolated conversation, with its own system prompt, tools, and model — and receive
+back only that sub-agent's final result. Verbose exploration/test/log output stays out of the parent
+context.
+
+Three tools are exposed to the agent:
+
+- **`subagent`** — dispatch a sub-agent (`subagent_type`, `prompt`, optional `model`/`thinking`/
+  `max_turns`). Foreground by default; `run_in_background: true` returns an agent ID to poll later;
+  `inherit_context: true` forks your conversation into the sub-agent; `resume: <id>` continues one.
+- **`get_subagent_result`** — poll/wait for a background sub-agent's result (`agent_id`, `wait`,
+  `verbose`).
+- **`steer_subagent`** — send a mid-run steering message to a running sub-agent.
+
+Built-in types ship with the harness and can be overridden by name (matched case-insensitively):
+`general-purpose` (all coding tools), `Explore` (read-only codebase investigation), `Plan` (read-only
+planning). `Explore`/`Plan` are one-shot and not resumable.
+
+Define your own as Markdown (YAML frontmatter + body) under `.pi/agents/` (project, trusted only) or
+`~/.pi/agent/agents/` (global). The body becomes the agent's specialized system prompt:
+
+```markdown
+---
+name: researcher
+description: Finds and summarizes prior art for a question.
+tools: [read, grep, find, ls]
+model: haiku
+thinking: high
+max_turns: 20
+---
+You are a meticulous research sub-agent. Return a compact, sourced digest.
+```
+
+Frontmatter fields: `name` (required; lowercase/digits/hyphens), `description` (required), `tools`
+(optional allowlist of built-in tool names — replaces the default set), `model` (optional;
+`provider/modelId`, alias, or `inherit`), `thinking` (optional level or `inherit`), `max_turns`
+(optional). Project files override global override built-ins; files closer to the working directory
+win. Use `/agents` to list registered types and any load diagnostics.
+
+**Safety.** Delegating work to a sub-agent never bypasses the harness policy: every tool call *inside*
+a sub-agent is classified by the same `policy-rules.ts` rules against the active mode, so a sub-agent
+is blocked or approval-gated exactly as the parent would be (approvals surface in your session). In
+`inspect`/`plan` modes sub-agents degrade to read-only tools. Sub-agents may nest up to a depth cap.
+
+Configuration:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PI_HARNESS_AGENTS_DIR` | `.pi/agents` | Override the project-scope agents directory (bypasses project trust; global still loads) |
+| `PI_HARNESS_SUBAGENT_MODEL` | inherit | Default model for sub-agents |
+| `PI_HARNESS_SUBAGENT_MAX_TURNS` | `50` | Default turn cap (`0` = uncapped) |
+| `PI_HARNESS_SUBAGENT_MAX_DEPTH` | `5` | Nesting depth cap |
+| `PI_HARNESS_SUBAGENT_MAX_CONCURRENCY` | `5` | Max concurrent background sub-agents |
+| `PI_HARNESS_DISABLE_SUBAGENTS` | unset | `1` disables the feature entirely |
 
 ## Security limitations
 

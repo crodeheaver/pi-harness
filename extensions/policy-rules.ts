@@ -33,7 +33,7 @@ const CONFIRM_COMMANDS: Array<[RegExp, string, string]> = [
 	[/\b(?:kill|killall|pkill|taskkill|Stop-Process)\b/i, "process-termination", "terminates processes"],
 ];
 
-const READ_ONLY_CUSTOM_TOOLS = new Set(["ask_user", "web_fetch", "task", "todo"]);
+const READ_ONLY_CUSTOM_TOOLS = new Set(["ask_user", "web_fetch", "task", "todo", "subagent", "get_subagent_result", "steer_subagent"]);
 /**
  * First-party harness tools that may mutate state but are audited as part of
  * the harness, so they are trusted without per-call approval in unrestricted
@@ -41,7 +41,7 @@ const READ_ONLY_CUSTOM_TOOLS = new Set(["ask_user", "web_fetch", "task", "todo"]
  * allowlist check above and remain subject to the path-sensitivity checks that
  * run before this point.
  */
-const HARNESS_FIRST_PARTY_TOOLS = new Set(["memory"]);
+const HARNESS_FIRST_PARTY_TOOLS = new Set(["memory", "subagent", "get_subagent_result", "steer_subagent"]);
 const MUTATING_TOOL_NAME = /(?:write|edit|replace|patch|delete|remove|upload|deploy|apply|execute|run|shell|bash)/i;
 const PATH_KEYS = /^(?:path|file|filePath|filename|directory|dir|cwd|root|target)$/i;
 
