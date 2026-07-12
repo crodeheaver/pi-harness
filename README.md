@@ -9,7 +9,6 @@ A small, auditable safety and workflow layer for [Pi](https://pi.dev). It adds p
 - **Session environment** — applies an `environment` object from Pi settings (`~/.pi/agent/settings.json`, then trusted `.pi/settings.json`) to the session's environment variables on startup.
 - **Safety policy** — blocks direct `write`/`edit` calls outside the workspace and to `.git`, `node_modules`, secret files, and private keys; gates sensitive reads and consequential shell commands.
 - **Anthropic subscription status** — shows whether the selected Anthropic model uses Pi's stored Pro/Max OAuth and can fail closed instead of using metered API credentials.
-- **Subagent policy bridge** — applies mode, concurrency, turn, model-routing, and approval guardrails when the optional `@gotgenes/pi-subagents` engine is installed.
 - **Harness modes** — `/mode inspect|plan|default|permissive|yolo|isolated`.
 - **Task profiles** — `/profile [name]` hot-swaps one trusted project profile from `./pi`.
 - **`ask_user` tool** — one structured question with an optional free-form answer.
@@ -39,7 +38,6 @@ For a temporary test:
 pi -e ./extensions/environment.ts \
   -e ./extensions/policy.ts \
   -e ./extensions/anthropic-subscription.ts \
-  -e ./extensions/subagent-bridge.ts \
   -e ./extensions/structured-question.ts \
   -e ./extensions/presets.ts \
   -e ./extensions/profiles.ts \
@@ -154,7 +152,7 @@ The rules below describe `default` and `isolated` modes. `permissive` bypasses t
 - Sensitive file reads, including symlink aliases
 - Reads outside the workspace
 - Opaque shell wrappers that cannot be classified reliably
-- MCP operations, subagent control, mutating custom tools, and any third-party tool not on the harness allowlist
+- MCP operations, mutating custom tools, and any third-party tool not on the harness allowlist
 - Recursive deletion
 - Destructive Git and force-push operations
 - Dependency and system-package changes
@@ -189,54 +187,12 @@ $env:PI_HARNESS_ANTHROPIC_SUBSCRIPTION_ONLY = "1"
 
 Do not start Pi with `--api-key` in subscription-only mode. A stored OAuth credential takes precedence over `ANTHROPIC_API_KEY`, but removing that environment variable avoids ambiguity in other Anthropic clients.
 
-## Optional subagents
-
-The harness supports [`@gotgenes/pi-subagents`](https://github.com/gotgenes/pi-packages/tree/main/packages/pi-subagents) as an optional engine. It is not bundled or installed automatically: third-party Pi extensions execute with the user's full process authority.
-
-Review the package, then install the audited version explicitly:
-
-```bash
-pi install npm:@gotgenes/pi-subagents@18.0.1
-```
-
-The bridge recognizes the engine's `subagent` tool and child lifecycle events. Defaults are intentionally conservative:
-
-- no subagents in `inspect` or `plan` modes;
-- at most 2 active or starting agents;
-- at most 20 turns per invocation;
-- foreground execution by default (background requests require a distinct policy approval);
-- model overrides rejected unless they exactly match the parent model;
-- only the reviewed `Explore`, `Plan`, and `general-purpose` built-ins enabled by default;
-- `Explore` and `Plan` treated as read-only roles; `general-purpose` requires mutation-capable-agent approval;
-- nesting depth-limited to 1 by default (`PI_HARNESS_SUBAGENT_MAX_DEPTH`);
-- child sessions inherit loaded harness extensions, so child tool calls remain subject to policy;
-- nested delegation is hard-disabled by the engine, which unconditionally strips the `subagent`, `get_subagent_result`, and `steer_subagent` tools from every child session (`EXCLUDED_TOOL_NAMES` in the engine's `create-subagent-session.ts`). Raising `PI_HARNESS_SUBAGENT_MAX_DEPTH` only relaxes the harness side of the guard; nesting still cannot occur until a reviewed engine change relaxes its tool strip. The harness depth check (derived from the session's own id and the engine's `parentSessionId` chain) is belt-and-suspenders for that case.
-
-Limits can be adjusted before starting Pi:
-
-```bash
-PI_HARNESS_SUBAGENT_MAX_CONCURRENT=2
-PI_HARNESS_SUBAGENT_MAX_TURNS=20
-# Admit one extra level of subagent nesting (also requires a matching engine change):
-# PI_HARNESS_SUBAGENT_MAX_DEPTH=2
-# Explicitly permit a different child model or reviewed custom roles when needed:
-PI_HARNESS_SUBAGENT_ALLOW_MODEL_OVERRIDE=1
-PI_HARNESS_SUBAGENT_ALLOW_CUSTOM_AGENTS=1
-```
-
-Accepted ranges are 1–16 concurrent agents, 1–100 turns, and 1–5 levels of nesting. Invalid values fall back to the defaults. The bridge clamps `max_turns`; it does not silently increase a smaller requested limit. Custom agents are disabled because their authoritative frontmatter can override call-site model and turn settings. Enabling them transfers responsibility for those fields to the reviewed agent definition.
-
-The engine's bundled `Explore` role currently pins an Anthropic Haiku model in its own agent definition. Agent frontmatter takes precedence over a call-site model value, so teams requiring strict parent-model inheritance should override that role in a reviewed user or project agent definition. The harness's Anthropic subscription-only check still applies before an Anthropic child prompt is sent.
-
-Child sessions are isolated contexts, not security sandboxes. In-process children share Pi's OS permissions, credentials, mounts, and network access. For untrusted repositories or unattended delegation, contain the entire parent Pi process in an OS-level sandbox. Git worktrees prevent edit collisions but are not a security boundary.
-
 ## Optional ecosystem integrations
 
 Third-party Pi packages execute with full process access and are not bundled. Review and pin them separately.
 
 - **`pi-landstrip`** — recommended companion for OS-level filesystem and network containment. A compatible integration can answer `audited-harness:sandbox-status-request` or emit `{ active: true, provider: "pi-landstrip" }` on `audited-harness:sandbox-status`.
 - **`pi-mcp-adapter`** — opt-in only. Every generic MCP operation is approval-gated by the harness; configure explicit server/tool allowlists rather than `npx ...@latest`.
-- **`@gotgenes/pi-subagents`** — recommended opt-in engine; the harness bridge adds conservative limits and policy integration. Pin and review it separately.
 - **`pi-lens`** — optional real-time diagnostics for teams willing to audit its native tooling, grammar downloads, language servers, and autofix behavior. The dependency-free `validate-change` skill remains the default.
 - **`@ayulab/pi-rewind`** — optional checkpoint restoration. Review its overwrite behavior and GPL-3.0 license before installation.
 

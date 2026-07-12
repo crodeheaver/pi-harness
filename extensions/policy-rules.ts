@@ -334,19 +334,6 @@ export function classifyCustomTool(
 	if (lower === "mcp" || lower.includes("mcp_")) {
 		return { action: "confirm", category: "mcp-operation", reason: "invokes an external MCP capability" };
 	}
-	if (lower.includes("subagent") || lower === "agent" || lower === "task_agent") {
-		const request = input as { run_in_background?: unknown; subagent_type?: unknown } | undefined;
-		if (request?.run_in_background === true) {
-			return { action: "confirm", category: "subagent-background", reason: "starts an agent that continues after the current tool call" };
-		}
-		if (lower === "subagent" && typeof request?.subagent_type === "string") {
-			const agentType = request.subagent_type.toLowerCase();
-			if (agentType !== "explore" && agentType !== "plan") {
-				return { action: "confirm", category: "subagent-mutation", reason: "starts an agent type that may modify the workspace" };
-			}
-		}
-		return { action: "confirm", category: "subagent-operation", reason: "starts or controls another agent process" };
-	}
 	if (MUTATING_TOOL_NAME.test(lower)) {
 		return { action: "confirm", category: "custom-tool-effect", reason: `custom tool ${toolName} may have external or mutating effects` };
 	}

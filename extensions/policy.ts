@@ -36,7 +36,7 @@ export default function policyExtension(pi: ExtensionAPI) {
 	}
 
 	function approvalKey(category: string, tool: string): string {
-		return ["third-party-tool", "custom-tool-effect", "mcp-operation", "subagent-operation"].includes(category)
+		return ["third-party-tool", "custom-tool-effect", "mcp-operation"].includes(category)
 			? `${category}:${tool}`
 			: category;
 	}

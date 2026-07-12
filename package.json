@@ -22,7 +22,6 @@
       "./extensions/environment.ts",
       "./extensions/policy.ts",
       "./extensions/anthropic-subscription.ts",
-      "./extensions/subagent-bridge.ts",
       "./extensions/structured-question.ts",
       "./extensions/presets.ts",
       "./extensions/profiles.ts",

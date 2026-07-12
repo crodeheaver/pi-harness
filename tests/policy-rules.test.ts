@@ -93,16 +93,6 @@ describe("tool policy", () => {
 
 	it("gates consequential custom tools and fails closed in restricted modes", () => {
 		assert.equal(classifyCustomTool("default", "mcp", cwd, { tool: "deploy" }).action, "confirm");
-		assert.equal(classifyCustomTool("default", "subagent", cwd, { action: "spawn" }).action, "confirm");
-		assert.deepEqual(classifyCustomTool("default", "subagent", cwd, { subagent_type: "general-purpose" }), {
-			action: "confirm", category: "subagent-mutation", reason: "starts an agent type that may modify the workspace",
-		});
-		assert.deepEqual(classifyCustomTool("default", "subagent", cwd, { subagent_type: "Explore" }), {
-			action: "confirm", category: "subagent-operation", reason: "starts or controls another agent process",
-		});
-		assert.deepEqual(classifyCustomTool("default", "subagent", cwd, { subagent_type: "Explore", run_in_background: true }), {
-			action: "confirm", category: "subagent-background", reason: "starts an agent that continues after the current tool call",
-		});
 		assert.equal(classifyCustomTool("inspect", "unknown_tool", cwd, {}).action, "block");
 		assert.equal(classifyCustomTool("inspect", "web_fetch", cwd, { url: "https://example.com" }).action, "allow");
 		assert.equal(classifyCustomTool("default", "custom_read", cwd, { path: "../outside" }).action, "confirm");
