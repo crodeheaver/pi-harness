@@ -2,3 +2,7 @@ node_modules/
 *.tgz
 coverage/
 .DS_Store
+
+# Pi session-local state (may hold secrets / per-session context)
+.pi/settings.json
+.pi/memory/

@@ -6,6 +6,7 @@ A small, auditable safety and workflow layer for [Pi](https://pi.dev). It adds p
 
 ### Extensions
 
+- **Session environment** — applies an `environment` object from Pi settings (`~/.pi/agent/settings.json`, then trusted `.pi/settings.json`) to the session's environment variables on startup.
 - **Safety policy** — blocks direct `write`/`edit` calls outside the workspace and to `.git`, `node_modules`, secret files, and private keys; gates sensitive reads and consequential shell commands.
 - **Anthropic subscription status** — shows whether the selected Anthropic model uses Pi's stored Pro/Max OAuth and can fail closed instead of using metered API credentials.
 - **Subagent policy bridge** — applies mode, concurrency, turn, model-routing, and approval guardrails when the optional `@gotgenes/pi-subagents` engine is installed.
@@ -15,6 +16,7 @@ A small, auditable safety and workflow layer for [Pi](https://pi.dev). It adds p
 - **Status** — footer indicators for the active mode and policy approvals/blocks.
 - **Secure web fetch** — public HTTP(S) text retrieval with redirect, SSRF, timeout, content-type, and size guards; never sends cookies or credentials.
 - **Task ledger** — a compact, branch-aware task tool and widget for genuinely multi-step work.
+- **Auto-memory** — Claude Code–style persistent project memory: durable context is saved to `.pi/memory/` as Markdown, the head of `MEMORY.md` is injected into the system prompt each turn, and the agent proactively saves facts worth keeping. Manage it with `/memory`.
 - **Plan approval** — plan mode restricts writes to one selected plan file until explicit review and approval.
 
 ### Skills
@@ -34,7 +36,8 @@ A small, auditable safety and workflow layer for [Pi](https://pi.dev). It adds p
 For a temporary test:
 
 ```bash
-pi -e ./extensions/policy.ts \
+pi -e ./extensions/environment.ts \
+  -e ./extensions/policy.ts \
   -e ./extensions/anthropic-subscription.ts \
   -e ./extensions/subagent-bridge.ts \
   -e ./extensions/structured-question.ts \
@@ -43,6 +46,7 @@ pi -e ./extensions/policy.ts \
   -e ./extensions/status.ts \
   -e ./extensions/web-fetch.ts \
   -e ./extensions/tasks.ts \
+  -e ./extensions/memory.ts \
   --skill ./skills/validate/SKILL.md \
   --skill ./skills/review/SKILL.md \
   --skill ./skills/research/SKILL.md \
@@ -204,20 +208,23 @@ The bridge recognizes the engine's `subagent` tool and child lifecycle events. D
 - model overrides rejected unless they exactly match the parent model;
 - only the reviewed `Explore`, `Plan`, and `general-purpose` built-ins enabled by default;
 - `Explore` and `Plan` treated as read-only roles; `general-purpose` requires mutation-capable-agent approval;
+- nesting depth-limited to 1 by default (`PI_HARNESS_SUBAGENT_MAX_DEPTH`);
 - child sessions inherit loaded harness extensions, so child tool calls remain subject to policy;
-- nested delegation remains disabled by the engine's recursion guard.
+- nested delegation is hard-disabled by the engine, which unconditionally strips the `subagent`, `get_subagent_result`, and `steer_subagent` tools from every child session (`EXCLUDED_TOOL_NAMES` in the engine's `create-subagent-session.ts`). Raising `PI_HARNESS_SUBAGENT_MAX_DEPTH` only relaxes the harness side of the guard; nesting still cannot occur until a reviewed engine change relaxes its tool strip. The harness depth check (derived from the session's own id and the engine's `parentSessionId` chain) is belt-and-suspenders for that case.
 
 Limits can be adjusted before starting Pi:
 
 ```bash
 PI_HARNESS_SUBAGENT_MAX_CONCURRENT=2
 PI_HARNESS_SUBAGENT_MAX_TURNS=20
+# Admit one extra level of subagent nesting (also requires a matching engine change):
+# PI_HARNESS_SUBAGENT_MAX_DEPTH=2
 # Explicitly permit a different child model or reviewed custom roles when needed:
 PI_HARNESS_SUBAGENT_ALLOW_MODEL_OVERRIDE=1
 PI_HARNESS_SUBAGENT_ALLOW_CUSTOM_AGENTS=1
 ```
 
-Accepted ranges are 1–16 concurrent agents and 1–100 turns. Invalid values fall back to the defaults. The bridge clamps `max_turns`; it does not silently increase a smaller requested limit. Custom agents are disabled because their authoritative frontmatter can override call-site model and turn settings. Enabling them transfers responsibility for those fields to the reviewed agent definition.
+Accepted ranges are 1–16 concurrent agents, 1–100 turns, and 1–5 levels of nesting. Invalid values fall back to the defaults. The bridge clamps `max_turns`; it does not silently increase a smaller requested limit. Custom agents are disabled because their authoritative frontmatter can override call-site model and turn settings. Enabling them transfers responsibility for those fields to the reviewed agent definition.
 
 The engine's bundled `Explore` role currently pins an Anthropic Haiku model in its own agent definition. Agent frontmatter takes precedence over a call-site model value, so teams requiring strict parent-model inheritance should override that role in a reviewed user or project agent definition. The harness's Anthropic subscription-only check still applies before an Anthropic child prompt is sent.
 
@@ -244,6 +251,40 @@ PI_HARNESS_NOTIFY=1 pi
 ```
 
 Terminal support varies.
+
+## Session environment
+
+The harness applies an `environment` object from Pi settings to the session's environment variables on startup. Put credentials, feature flags, or tool configuration in `~/.pi/agent/settings.json` (global) and/or `.pi/settings.json` (project):
+
+```json
+{
+  "environment": {
+    "ANTHROPIC_API_KEY": "sk-ant-...",
+    "NODE_ENV": "test",
+    "LOG_LEVEL": "debug"
+  }
+}
+```
+
+- Values are read from global settings first, then overlaid by project settings (project wins on key conflicts).
+- String, number, and boolean values are accepted; numbers and booleans are coerced to strings. Nested objects, arrays, and `null` values are rejected with a startup error.
+- Settings values **overwrite** the inherited environment. Use the real shell environment if you need it to take precedence.
+- The project layer (`.pi/settings.json`) is applied only after project trust is granted, matching Pi's resource-loading rules. Global settings apply to every session.
+- The `ENVIRONMENT` key is accepted as an alias; `environment` (camelCase) is canonical and wins if both are present.
+- Applied variables persist for the process, so they are available to shell commands, `$VAR` interpolation in provider configuration, and extension code. Removing a key from settings and reloading does not unset a variable that was applied earlier.
+
+Because values may be secrets, the startup notice reports only the count applied, never the names or values.
+
+## Auto-memory
+
+Claude Code–style persistent project memory, defaulting to the project's `.pi/memory` folder.
+
+- **Storage** — durable context is plain Markdown in `.pi/memory/`: a `MEMORY.md` index plus any number of topic files. Edit them directly, or with `/memory edit [file]`.
+- **Loading** — the head of `MEMORY.md` (≤ 200 lines / 25 KB) is injected into the system prompt every turn, so prior memories are available without an explicit read. Topic files are listed by name and read on demand via the `memory` tool.
+- **Saving** — the agent is nudged to proactively persist durable facts, preferences, corrections, and decisions that would help a future session, using the sandboxed `memory` tool. There is no write-time approval prompt; review saved memories after the fact with `/memory`.
+- **The `memory` tool** — `save` (append, or `append=false` to curate after `read`), `read`, `list`, and `delete`. Writes are confined to the memory directory and the policy treats the tool as a first-party harness tool (trusted, but blocked in `inspect`/`plan`).
+- **`/memory` command** — `status` (default), `edit [file]`, `list`, `on`, `off`.
+- **Defaults & overrides** — auto-memory is on by default. Disable with `PI_HARNESS_AUTO_MEMORY=0` (alias `PI_HARNESS_DISABLE_AUTO_MEMORY=1`) or `/memory off` for the session. Point memory elsewhere with `PI_HARNESS_MEMORY_DIR` (absolute, `~/`, or project-relative). Project-local memory (the default directory) loads only for trusted projects, like other `.pi/` resources; an explicit `PI_HARNESS_MEMORY_DIR` is an opt-in that bypasses the trust gate.
 
 ## Security limitations
 

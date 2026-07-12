@@ -108,6 +108,16 @@ describe("tool policy", () => {
 		assert.equal(classifyCustomTool("default", "custom_read", cwd, { path: "../outside" }).action, "confirm");
 	});
 
+	it("trusts the first-party memory tool without approval but blocks it in restricted modes", () => {
+		assert.equal(classifyCustomTool("default", "memory", cwd, { action: "save" }).action, "allow");
+		assert.equal(classifyCustomTool("default", "memory", cwd, { action: "save", file: "api" }).action, "allow");
+		assert.equal(classifyCustomTool("isolated", "memory", cwd, { action: "delete" }).action, "allow");
+		assert.equal(classifyCustomTool("inspect", "memory", cwd, { action: "save" }).action, "block");
+		assert.equal(classifyCustomTool("plan", "memory", cwd, { action: "read" }).action, "block");
+		// defence in depth: a traversal attempt still prompts before the first-party allow
+		assert.equal(classifyCustomTool("default", "memory", cwd, { action: "save", file: "../escape" }).action, "confirm");
+	});
+
 	it("allows routine commands in default mode", () => {
 		for (const command of ["git status", "npm test", "npm run check", "rg TODO src", "git diff --check"]) {
 			assert.equal(classifyCommand("default", command).action, "allow", command);

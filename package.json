@@ -19,6 +19,7 @@
   ],
   "pi": {
     "extensions": [
+      "./extensions/environment.ts",
       "./extensions/policy.ts",
       "./extensions/anthropic-subscription.ts",
       "./extensions/subagent-bridge.ts",
@@ -27,7 +28,8 @@
       "./extensions/profiles.ts",
       "./extensions/status.ts",
       "./extensions/web-fetch.ts",
-      "./extensions/tasks.ts"
+      "./extensions/tasks.ts",
+      "./extensions/memory.ts"
     ],
     "skills": ["./skills"],
     "prompts": ["./prompts"]

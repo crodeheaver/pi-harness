@@ -34,6 +34,14 @@ const CONFIRM_COMMANDS: Array<[RegExp, string, string]> = [
 ];
 
 const READ_ONLY_CUSTOM_TOOLS = new Set(["ask_user", "web_fetch", "task", "todo"]);
+/**
+ * First-party harness tools that may mutate state but are audited as part of
+ * the harness, so they are trusted without per-call approval in unrestricted
+ * modes. They are still blocked in inspect/plan by the restricted-mode
+ * allowlist check above and remain subject to the path-sensitivity checks that
+ * run before this point.
+ */
+const HARNESS_FIRST_PARTY_TOOLS = new Set(["memory"]);
 const MUTATING_TOOL_NAME = /(?:write|edit|replace|patch|delete|remove|upload|deploy|apply|execute|run|shell|bash)/i;
 const PATH_KEYS = /^(?:path|file|filePath|filename|directory|dir|cwd|root|target)$/i;
 
@@ -322,6 +330,7 @@ export function classifyCustomTool(
 		if (READ_ONLY_CUSTOM_TOOLS.has(lower)) return { action: "allow" };
 		return { action: "block", category: `${mode}-custom-tool`, reason: `custom tool ${toolName} is not allowlisted in ${mode} mode` };
 	}
+	if (HARNESS_FIRST_PARTY_TOOLS.has(lower)) return { action: "allow" };
 	if (lower === "mcp" || lower.includes("mcp_")) {
 		return { action: "confirm", category: "mcp-operation", reason: "invokes an external MCP capability" };
 	}
