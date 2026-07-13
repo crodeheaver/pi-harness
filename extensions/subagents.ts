@@ -537,6 +537,16 @@ export interface AgentRun {
 	done: Promise<void>;
 }
 
+/**
+ * Count runs whose status is still "running" (the active sub-agents). Extracted as
+ * a pure helper so the footer count is unit-testable without an SDK runner.
+ */
+export function countActiveRuns(runs: Iterable<Pick<AgentRun, "status">>): number {
+	let n = 0;
+	for (const r of runs) if (r.status === "running") n++;
+	return n;
+}
+
 interface GateHooks {
 	mode: HarnessMode;
 	cwd: string;
@@ -654,6 +664,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 	const runs = new Map<string, AgentRun>();
 	const bgQueue: Array<() => void> = [];
 	let runningBackground = 0;
+	let lastCtx: ExtensionContext | undefined;
 
 	pi.events.on("audited-harness:mode", (value: unknown) => {
 		if (isHarnessMode(value)) mode = value;
@@ -661,11 +672,13 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		lastCtx = ctx;
 		cfg = resolveSubagentConfig(process.env, ctx.cwd);
 		runs.clear();
 		runningBackground = 0;
 		bgQueue.length = 0;
 		await refreshRegistry(ctx);
+		renderStatus();
 	});
 
 	pi.on("session_shutdown", () => {
@@ -676,9 +689,11 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		runs.clear();
 		bgQueue.length = 0;
 		runningBackground = 0;
+		renderStatus();
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
+		lastCtx = ctx;
 		if (!cfg.enabled) return;
 		const selected = event.systemPromptOptions.selectedTools;
 		if (selected && !selected.includes("subagent")) return;
@@ -687,6 +702,17 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		const block = buildAgentsPrompt(registry, { depth: 0, maxDepth: cfg.maxDepth });
 		if (!block) return;
 		return { systemPrompt: `${event.systemPrompt}\n\n${block}` };
+	});
+
+	// Keep the active-agent footer fresh: capture the latest UI context and
+	// re-render whenever a turn boundary passes (catches background completions).
+	pi.on("tool_execution_end", (_event, ctx) => {
+		lastCtx = ctx;
+		renderStatus();
+	});
+	pi.on("agent_settled", (_event, ctx) => {
+		lastCtx = ctx;
+		renderStatus();
 	});
 
 	async function refreshRegistry(ctx: ExtensionContext): Promise<void> {
@@ -699,6 +725,17 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		const event = { ...entry, timestamp: Date.now() };
 		pi.appendEntry("audited-harness:audit", event);
 		pi.events.emit("audited-harness:audit", event);
+	}
+
+	/** Render the active sub-agent count into the footer status bar. */
+	function renderStatus(): void {
+		const ctx = lastCtx;
+		if (!ctx) return;
+		const active = countActiveRuns(runs.values());
+		ctx.ui.setStatus(
+			"audited-harness:subagents",
+			active > 0 ? ctx.ui.theme.fg("muted", `agents:${active}`) : undefined,
+		);
 	}
 
 	function listTypes(): string {
@@ -853,6 +890,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 			} finally {
 				unsubscribe();
 				resolveDone();
+				renderStatus();
 			}
 		})();
 
@@ -868,6 +906,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		});
 		const run: AgentRun = { id, type: params.subagent_type ?? DEFAULT_TYPE, depth, background: false, status: "running", startedAt: Date.now(), done };
 		runs.set(id, run);
+		renderStatus();
 		const started = await startRun({ params, parentCtx, depth, run, resolveDone, background: false, push });
 		if (!started) throw new Error(run.error ?? "sub-agent failed to start");
 		await run.done;
@@ -964,16 +1003,19 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 				if (!existing.session) throw new Error(`Agent ${params.resume} has no active session.`);
 				existing.status = "running";
 				push(`resuming ${existing.type}`);
+				renderStatus();
 				try {
 					await existing.session.prompt(params.prompt);
 				} catch (error) {
 					existing.status = "errored";
 					existing.error = (error as Error).message;
+					renderStatus();
 					throw new Error(`Sub-agent error: ${existing.error}`);
 				}
 				const text = extractFinalText(existing.session.messages as unknown as { role: string; content: unknown }[]);
 				existing.finalText = text;
 				existing.status = "completed";
+				renderStatus();
 				return { content: [{ type: "text", text: text || "(sub-agent returned no final text)" }], details: { agent_id: existing.id, resumed: true } };
 			}
 
@@ -986,6 +1028,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 				});
 				const run: AgentRun = { id, type: params.subagent_type ?? DEFAULT_TYPE, depth: 1, background: true, status: "running", startedAt: Date.now(), done };
 				runs.set(id, run);
+				renderStatus();
 				void (async () => {
 					const release = await acquireBackground();
 					try {

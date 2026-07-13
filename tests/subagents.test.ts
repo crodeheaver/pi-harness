@@ -6,6 +6,7 @@ import { afterEach, describe, it } from "node:test";
 import {
 	BUILTIN_AGENTS,
 	ONESHOT_TYPES,
+	countActiveRuns,
 	buildAgentsPrompt,
 	collectAgentFiles,
 	computeEffectiveTools,
@@ -271,5 +272,27 @@ describe("prompt block & helpers", () => {
 			"part two",
 		);
 		assert.equal(extractFinalText([{ role: "user", content: "hi" }]), "");
+	});
+});
+
+describe("active sub-agent counting", () => {
+	it("counts only runs whose status is still running", () => {
+		const runs: { status: "running" | "completed" | "errored" | "aborted" }[] = [
+			{ status: "running" },
+			{ status: "running" },
+			{ status: "completed" },
+			{ status: "errored" },
+			{ status: "aborted" },
+			{ status: "running" },
+		];
+		assert.equal(countActiveRuns(runs), 3);
+	});
+
+	it("returns 0 when no runs are running", () => {
+		assert.equal(countActiveRuns([{ status: "completed" as const }, { status: "aborted" as const }]), 0);
+	});
+
+	it("returns 0 for an empty iterable", () => {
+		assert.equal(countActiveRuns([]), 0);
 	});
 });

@@ -10,7 +10,7 @@ export default function statusExtension(pi: ExtensionAPI) {
 
 	function render(ctx: ExtensionContext) {
 		const theme = ctx.ui.theme;
-		const parts = [theme.fg("success", "shield:on")];
+		const parts = [];
 		if (approved) parts.push(theme.fg("warning", `${approved} approved`));
 		if (blocked) parts.push(theme.fg("error", `${blocked} blocked`));
 		ctx.ui.setStatus("audited-harness:safety", parts.join(theme.fg("dim", " · ")));
