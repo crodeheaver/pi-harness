@@ -3,9 +3,11 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
-import {
+import subagentsExtension, {
 	BUILTIN_AGENTS,
+	DISPATCH_TOOL_NAMES,
 	ONESHOT_TYPES,
+	SUBAGENT_DECISION_GUIDANCE,
 	countActiveRuns,
 	buildAgentsPrompt,
 	collectAgentFiles,
@@ -15,12 +17,14 @@ import {
 	findAgent,
 	findRepoRoot,
 	generateAgentId,
+	latestSubagentSessionState,
 	mergeAgents,
 	parseAgentFile,
 	resolveMaxTurns,
 	resolveModelSpec,
 	resolveSubagentConfig,
 	resolveThinking,
+	updateSubagentTools,
 } from "../extensions/subagents.ts";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
@@ -65,6 +69,100 @@ describe("sub-agent configuration", () => {
 		assert.equal(cfg.maxTurns, 0);
 		assert.equal(cfg.maxDepth, 3);
 		assert.equal(cfg.defaultModel, "haiku");
+	});
+});
+
+describe("session-level sub-agent setting", () => {
+	it("restores the latest valid setting and filters its tool snapshot", () => {
+		const entries = [
+			{ type: "custom", customType: "audited-harness:subagents", data: { enabled: true, restoreTools: ["subagent"] } },
+			{ type: "custom", customType: "other", data: { enabled: false, restoreTools: [] } },
+			{
+				type: "custom",
+				customType: "audited-harness:subagents",
+				data: { enabled: false, restoreTools: ["subagent", "unknown", "subagent", "steer_subagent"] },
+			},
+			{ type: "custom", customType: "audited-harness:subagents", data: { enabled: "no", restoreTools: [] } },
+		];
+		assert.deepEqual(latestSubagentSessionState(entries), {
+			enabled: false,
+			restoreTools: ["subagent", "steer_subagent"],
+		});
+	});
+
+	it("removes and restores only sub-agent tools", () => {
+		const active = ["read", ...DISPATCH_TOOL_NAMES, "memory"];
+		const disabled = updateSubagentTools(active, false);
+		assert.deepEqual(disabled, ["read", "memory"]);
+		assert.deepEqual(updateSubagentTools(disabled, true, ["subagent", "steer_subagent"]), [
+			"read",
+			"memory",
+			"subagent",
+			"steer_subagent",
+		]);
+	});
+
+	it("/agents off persists the setting, removes the tools, and blocks stale dispatches", async () => {
+		type CapturedCommand = {
+			handler: (args: string, ctx: { ui: { notify: (message: string, level: string) => void } }) => Promise<void> | void;
+		};
+		type CapturedTool = {
+			execute: (id: string, params: { prompt: string }, signal: AbortSignal | undefined, onUpdate: undefined, ctx: unknown) => Promise<unknown>;
+		};
+		let activeTools = ["read", ...DISPATCH_TOOL_NAMES, "memory"];
+		let agentsCommand: CapturedCommand | undefined;
+		let subagentTool: CapturedTool | undefined;
+		const entries: Array<{ customType: string; data: unknown }> = [];
+		const notifications: string[] = [];
+		type CapturedHook = (event: unknown, ctx: unknown) => Promise<void> | void;
+		const hooks = new Map<string, CapturedHook[]>();
+		const pi = {
+			events: { on() {}, emit() {} },
+			on(name: string, handler: CapturedHook) {
+				const registered = hooks.get(name) ?? [];
+				registered.push(handler);
+				hooks.set(name, registered);
+			},
+			registerTool(tool: { name: string }) {
+				if (tool.name === "subagent") subagentTool = tool as unknown as CapturedTool;
+			},
+			registerCommand(name: string, command: unknown) {
+				if (name === "agents") agentsCommand = command as CapturedCommand;
+			},
+			getActiveTools: () => [...activeTools],
+			setActiveTools(tools: string[]) { activeTools = tools; },
+			appendEntry(customType: string, data: unknown) { entries.push({ customType, data }); },
+		};
+		subagentsExtension(pi as never);
+		assert.ok(agentsCommand);
+		await agentsCommand.handler("off", { ui: { notify: (message) => notifications.push(message) } });
+		assert.deepEqual(activeTools, ["read", "memory"]);
+		assert.deepEqual(entries.at(-1), {
+			customType: "audited-harness:subagents",
+			data: { enabled: false, restoreTools: [...DISPATCH_TOOL_NAMES] },
+		});
+		assert.match(notifications.at(-1) ?? "", /disabled for this session/);
+		assert.ok(subagentTool);
+		await assert.rejects(() => subagentTool!.execute("call", { prompt: "work" }, undefined, undefined, {}), /disabled for this session/);
+
+		let branchEntries: unknown[] = [];
+		const runtimeCtx = {
+			cwd: process.cwd(),
+			sessionManager: { getBranch: () => branchEntries },
+			ui: { setStatus() {}, theme: { fg: (_color: string, text: string) => text } },
+		};
+		for (const handler of hooks.get("session_tree") ?? []) await handler({}, runtimeCtx);
+		assert.deepEqual(activeTools, ["read", "memory", ...DISPATCH_TOOL_NAMES]);
+		branchEntries = [{
+			type: "custom",
+			customType: "audited-harness:subagents",
+			data: { enabled: false, restoreTools: [...DISPATCH_TOOL_NAMES] },
+		}];
+		for (const handler of hooks.get("session_tree") ?? []) await handler({}, runtimeCtx);
+		assert.deepEqual(activeTools, ["read", "memory"]);
+
+		for (const handler of hooks.get("session_shutdown") ?? []) await handler({}, runtimeCtx);
+		assert.deepEqual(activeTools, ["read", "memory", ...DISPATCH_TOOL_NAMES]);
 	});
 });
 
@@ -252,6 +350,8 @@ describe("prompt block & helpers", () => {
 		assert.match(block, /Sub-agents/);
 		assert.match(block, /general-purpose/);
 		assert.match(block, /Explore/);
+		assert.ok(block.includes(SUBAGENT_DECISION_GUIDANCE));
+		assert.match(block, /Delegate when the expected improvement in quality, latency, or isolation exceeds/);
 	});
 
 	it("emits nothing at the depth cap", () => {

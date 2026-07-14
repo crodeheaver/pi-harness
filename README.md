@@ -16,7 +16,7 @@ A small, auditable safety and workflow layer for [Pi](https://pi.dev). It adds p
 - **Secure web fetch** — public HTTP(S) text retrieval with redirect, SSRF, timeout, content-type, and size guards; never sends cookies or credentials.
 - **Task ledger** — a compact, branch-aware task tool and widget for genuinely multi-step work.
 - **Auto-memory** — Claude Code–style persistent project memory: durable context is saved to `.pi/memory/` as Markdown, the head of `MEMORY.md` is injected into the system prompt each turn, and the agent proactively saves facts worth keeping. Manage it with `/memory`.
-- **Sub-agents** — Claude Code–style sub-agent framework: dispatch isolated, specialized agents (`general-purpose`, `Explore`, `Plan`, or custom `.pi/agents/*.md` definitions) that run in their own context and return only a summary; foreground, background (`run_in_background`), fork (`inherit_context`), resume, and steer. Every sub-agent tool call honors the harness safety policy. Manage with `/agents`.
+- **Sub-agents** — Claude Code–style sub-agent framework: dispatch isolated, specialized agents (`general-purpose`, `Explore`, `Plan`, or custom `.pi/agents/*.md` definitions) that run in their own context and return only a summary; foreground, background (`run_in_background`), fork (`inherit_context`), resume, and steer. Every sub-agent tool call honors the harness safety policy. Manage or disable them for the current session with `/agents`.
 - **Plan approval** — plan mode restricts writes to one selected plan file until explicit review and approval.
 
 ### Skills
@@ -282,7 +282,11 @@ Frontmatter fields: `name` (required; lowercase/digits/hyphens), `description` (
 (optional allowlist of built-in tool names — replaces the default set), `model` (optional;
 `provider/modelId`, alias, or `inherit`), `thinking` (optional level or `inherit`), `max_turns`
 (optional). Project files override global override built-ins; files closer to the working directory
-win. Use `/agents` to list registered types and any load diagnostics.
+win. Use `/agents` to list registered types and any load diagnostics. `/agents off` disables all
+sub-agent tools for the current session and aborts active runs; `/agents on` restores the tools that
+were active before disabling. The setting is stored with the session, so it survives reloads and
+resuming that session without affecting other sessions. Use `/agents status` to inspect it. The
+session setting cannot override `PI_HARNESS_DISABLE_SUBAGENTS=1`.
 
 **Safety.** Delegating work to a sub-agent never bypasses the harness policy: every tool call *inside*
 a sub-agent is classified by the same `policy-rules.ts` rules against the active mode, so a sub-agent

@@ -73,6 +73,42 @@ export const BUILTIN_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "fin
 export const READONLY_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
 /** Dispatch tool names (present below the depth cap). */
 export const DISPATCH_TOOL_NAMES = ["subagent", "get_subagent_result", "steer_subagent"] as const;
+/** Session entry used to persist the per-session enabled setting. */
+export const SUBAGENT_SESSION_STATE_ENTRY = "audited-harness:subagents";
+
+export interface SubagentSessionState {
+	enabled: boolean;
+	/** Dispatch tools that were active before the feature was disabled. */
+	restoreTools: string[];
+}
+
+/** Restore the latest valid sub-agent setting from the active session branch. */
+export function latestSubagentSessionState(entries: readonly unknown[]): SubagentSessionState | undefined {
+	let state: SubagentSessionState | undefined;
+	for (const value of entries) {
+		const entry = value as { type?: unknown; customType?: unknown; data?: unknown };
+		if (entry.type !== "custom" || entry.customType !== SUBAGENT_SESSION_STATE_ENTRY) continue;
+		const data = entry.data as { enabled?: unknown; restoreTools?: unknown } | undefined;
+		if (typeof data?.enabled !== "boolean" || !Array.isArray(data.restoreTools)) continue;
+		state = {
+			enabled: data.enabled,
+			restoreTools: [...new Set(data.restoreTools.filter((tool): tool is string =>
+				typeof tool === "string" && (DISPATCH_TOOL_NAMES as readonly string[]).includes(tool),
+			))],
+		};
+	}
+	return state;
+}
+
+/** Add or remove only the sub-agent tools without disturbing other active tools. */
+export function updateSubagentTools(activeTools: readonly string[], enabled: boolean, restoreTools: readonly string[] = DISPATCH_TOOL_NAMES): string[] {
+	const dispatchTools = DISPATCH_TOOL_NAMES as readonly string[];
+	if (!enabled) return activeTools.filter((tool) => !dispatchTools.includes(tool));
+	return [...new Set([
+		...activeTools,
+		...restoreTools.filter((tool) => dispatchTools.includes(tool)),
+	])];
+}
 
 /** `name` must be lowercase/digits/hyphens (built-in names are an exception). */
 export const NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -476,12 +512,39 @@ export function resolveMaxTurns(callTurns: number | undefined, defTurns: number 
  * System-prompt registry block & result helpers
  * ------------------------------------------------------------------ */
 
+export const SUBAGENT_DECISION_GUIDANCE = `Invoke a subagent only for a clear reason
+
+Useful reasons include:
+
+1. **Capability specialization**
+   The task requires a tool, model, domain skill, or data source the parent lacks.
+
+2. **Parallelism**
+   Several substantial tasks are independent and can run concurrently.
+
+3. **Context isolation**
+   A large body of material can be analyzed separately without polluting the parent’s working context.
+
+4. **Independent verification**
+   A second agent can challenge a conclusion, inspect code, or reproduce a result.
+
+5. **Fault or permission isolation**
+   Risky tools, untrusted inputs, or sensitive data should be handled within a constrained execution boundary.
+
+Avoid delegation when the task is trivial, requires constant back-and-forth with the parent, cannot be independently validated, or costs more to describe and integrate than to perform directly.
+
+A useful decision rule is:
+
+> Delegate when the expected improvement in quality, latency, or isolation exceeds the cost of specification, execution, and verification.`;
+
 export function buildAgentsPrompt(agents: AgentDefinition[], opts: { depth: number; maxDepth: number }): string {
 	if (opts.depth >= opts.maxDepth) return "";
 	const lines: string[] = [
 		"## Sub-agents",
 		"",
 		"Launch a specialized agent for complex, multi-step tasks. The sub-agent runs in its own isolated context and returns only its final result; its intermediate tool output stays out of your context.",
+		"",
+		SUBAGENT_DECISION_GUIDANCE,
 		"",
 		"Available agent types (`subagent_type`, matched case-insensitively):",
 	];
@@ -659,6 +722,8 @@ interface DispatchParams {
 export default function subagentsExtension(pi: ExtensionAPI): void {
 	let mode: HarnessMode = "default";
 	let cfg = resolveSubagentConfig(process.env, process.cwd());
+	let sessionEnabled = true;
+	let restoreTools: string[] = [];
 	let registry: AgentDefinition[] = [...BUILTIN_AGENTS];
 	let diagnostics: string[] = [];
 	const runs = new Map<string, AgentRun>();
@@ -673,10 +738,10 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_start", async (_event, ctx) => {
 		lastCtx = ctx;
-		cfg = resolveSubagentConfig(process.env, ctx.cwd);
 		runs.clear();
 		runningBackground = 0;
 		bgQueue.length = 0;
+		restoreSessionSetting(ctx, false);
 		await refreshRegistry(ctx);
 		renderStatus();
 	});
@@ -689,16 +754,32 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		runs.clear();
 		bgQueue.length = 0;
 		runningBackground = 0;
+		// Active-tool state carries across session replacement. Restore only the
+		// dispatch tools removed by this setting; a disabled resumed session will
+		// remove them again in its own session_start handler.
+		if (!sessionEnabled && cfg.enabled) {
+			pi.setActiveTools(updateSubagentTools(pi.getActiveTools(), true, restoreTools));
+		}
 		renderStatus();
 	});
 
+	pi.on("session_tree", (_event, ctx) => {
+		lastCtx = ctx;
+		restoreSessionSetting(ctx, true);
+		renderStatus();
+	});
+
+	pi.on("input", () => applySessionToolSetting());
+
 	pi.on("before_agent_start", async (event, ctx) => {
 		lastCtx = ctx;
-		if (!cfg.enabled) return;
+		cfg = resolveSubagentConfig(process.env, ctx.cwd);
+		applySessionToolSetting();
+		if (!subagentsEnabled()) return;
 		const selected = event.systemPromptOptions.selectedTools;
 		if (selected && !selected.includes("subagent")) return;
-		cfg = resolveSubagentConfig(process.env, ctx.cwd);
 		await refreshRegistry(ctx);
+		if (!subagentsEnabled()) return;
 		const block = buildAgentsPrompt(registry, { depth: 0, maxDepth: cfg.maxDepth });
 		if (!block) return;
 		return { systemPrompt: `${event.systemPrompt}\n\n${block}` };
@@ -742,6 +823,48 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		return registry.map((a) => `- ${a.name}: ${a.description.split("\n")[0]}`).join("\n");
 	}
 
+	function subagentsEnabled(): boolean {
+		return cfg.enabled && sessionEnabled;
+	}
+
+	function restoreSessionSetting(ctx: ExtensionContext, restoreWhenEnabled: boolean): void {
+		cfg = resolveSubagentConfig(process.env, ctx.cwd);
+		const previousRestoreTools = restoreTools;
+		const restored = latestSubagentSessionState(ctx.sessionManager.getBranch());
+		sessionEnabled = restored?.enabled ?? true;
+		restoreTools = restored?.restoreTools ?? (restoreWhenEnabled ? previousRestoreTools : []);
+		if (subagentsEnabled()) {
+			if (restoreWhenEnabled) {
+				pi.setActiveTools(updateSubagentTools(pi.getActiveTools(), true, restoreTools));
+			}
+		} else {
+			applySessionToolSetting();
+			abortActiveRuns();
+		}
+	}
+
+	function applySessionToolSetting(): void {
+		if (subagentsEnabled()) return;
+		const active = pi.getActiveTools();
+		const next = updateSubagentTools(active, false);
+		if (next.length !== active.length) pi.setActiveTools(next);
+	}
+
+	function persistSessionSetting(): void {
+		pi.appendEntry(SUBAGENT_SESSION_STATE_ENTRY, { enabled: sessionEnabled, restoreTools });
+	}
+
+	function abortActiveRuns(): number {
+		let aborted = 0;
+		for (const run of runs.values()) {
+			if (run.status !== "running") continue;
+			run.status = "aborted";
+			run.session?.abort().catch(() => {});
+			aborted++;
+		}
+		return aborted;
+	}
+
 	/** Resolve a model spec against the parent registry, falling back to the parent model. */
 	function resolveModel(spec: string | undefined, parentCtx: ExtensionContext): NonNullable<AgentSession["model"]> | undefined {
 		if (!spec) return parentCtx.model ?? undefined;
@@ -773,6 +896,12 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		push?: (text: string) => void;
 	}): Promise<boolean> {
 		const { params, parentCtx, depth, run, resolveDone, background, push } = o;
+
+		if (!subagentsEnabled() || run.status === "aborted") {
+			run.status = "aborted";
+			resolveDone();
+			return false;
+		}
 
 		const def = findAgent(registry, params.subagent_type ?? DEFAULT_TYPE) ?? findAgent(registry, DEFAULT_TYPE);
 		if (!def) {
@@ -827,12 +956,22 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 			});
 			session = created.session;
 		} catch (error) {
-			run.status = "errored";
-			run.error = `Failed to start sub-agent: ${(error as Error).message}`;
+			if ((run as AgentRun).status !== "aborted") {
+				run.status = "errored";
+				run.error = `Failed to start sub-agent: ${(error as Error).message}`;
+			}
 			resolveDone();
 			return false;
 		}
 		run.session = session;
+		// The session setting may have changed while the resource loader/session was
+		// being created. Do not let that race start a run after `/agents off`.
+		if (!subagentsEnabled() || (run as AgentRun).status === "aborted") {
+			run.status = "aborted";
+			await session.abort().catch(() => {});
+			resolveDone();
+			return false;
+		}
 
 		// Fork: seed the sub-agent with the parent's current conversation branch.
 		if (params.inherit_context) {
@@ -876,17 +1015,22 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 				const errMsg = (session.agent.state as { errorMessage?: string } | undefined)?.errorMessage;
 				const text = extractFinalText(session.messages as unknown as { role: string; content: unknown }[]);
 				run.finalText = text;
-				if (capped) {
-					run.status = "completed";
-					run.finalText = `${text}\n\n(turn cap of ${maxTurns} reached)`.trim();
-				} else if (parentCtx.signal?.aborted) run.status = "aborted";
-				else if (errMsg && !text) {
-					run.status = "errored";
-					run.error = errMsg;
-				} else run.status = "completed";
+				// Preserve an explicit /agents off or session-shutdown abort.
+				if (run.status !== "aborted") {
+					if (capped) {
+						run.status = "completed";
+						run.finalText = `${text}\n\n(turn cap of ${maxTurns} reached)`.trim();
+					} else if (!background && parentCtx.signal?.aborted) run.status = "aborted";
+					else if (errMsg && !text) {
+						run.status = "errored";
+						run.error = errMsg;
+					} else run.status = "completed";
+				}
 			} catch (error) {
-				run.status = "errored";
-				run.error = (error as Error).message;
+				if (run.status !== "aborted") {
+					run.status = "errored";
+					run.error = (error as Error).message;
+				}
 			} finally {
 				unsubscribe();
 				resolveDone();
@@ -922,6 +1066,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		if (params.wait && run.status === "running") await run.done;
 		if (run.status === "running") return { text: `Agent ${run.id} (${run.type}) is still running.` };
 		if (run.status === "errored") throw new Error(`Agent ${run.type} errored: ${run.error ?? "unknown error"}`);
+		if (run.status === "aborted") throw new Error(`Agent ${run.type} (${run.id}) was aborted.`);
 		const body = run.finalText || "(no final text)";
 		const transcript = params.verbose && run.session ? extractFullTranscript(run.session) : undefined;
 		return { text: transcript ? `${body}\n\n--- transcript ---\n${transcript}` : body };
@@ -946,6 +1091,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 			description: "Dispatch a specialized sub-agent for a complex, multi-step task.",
 			parameters: SubagentParameters,
 			async execute(_id, params, _signal, onUpdate, ctx) {
+				if (!subagentsEnabled()) throw new Error("Sub-agents are disabled for this session.");
 				const { text } = await foregroundDispatch(
 					params as DispatchParams,
 					ctx,
@@ -961,6 +1107,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 			description: "Retrieve the status/result of a sub-agent by id.",
 			parameters: GetResultParameters,
 			async execute(_id, params) {
+				if (!subagentsEnabled()) throw new Error("Sub-agents are disabled for this session.");
 				const { text } = await getResult(params as { agent_id: string; wait?: boolean; verbose?: boolean });
 				return { content: [{ type: "text", text }], details: {} };
 			},
@@ -971,6 +1118,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 			description: "Send a steering message to a running sub-agent.",
 			parameters: SteerParameters,
 			async execute(_id, params) {
+				if (!subagentsEnabled()) throw new Error("Sub-agents are disabled for this session.");
 				const { text } = await steer(params as { agent_id: string; message: string });
 				return { content: [{ type: "text", text }], details: {} };
 			},
@@ -991,8 +1139,8 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 			"Pass run_in_background=true when you don't need the result immediately, then retrieve it with get_subagent_result.",
 		],
 		parameters: SubagentParameters,
-		async execute(_id, params, _signal, onUpdate, ctx) {
-			if (!cfg.enabled) throw new Error("Sub-agents are disabled.");
+		async execute(_id, params, signal, onUpdate, ctx) {
+			if (!subagentsEnabled()) throw new Error("Sub-agents are disabled for this session.");
 			const push = (text: string) => onUpdate?.({ content: [{ type: "text", text }], details: {} });
 
 			// Resume an existing in-session sub-agent with a new prompt.
@@ -1001,22 +1149,40 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 				if (!existing) throw new Error(`No such agent: ${params.resume}`);
 				if (ONESHOT_TYPES.has(existing.type.toLowerCase())) throw new Error(`${existing.type} is one-shot and cannot be resumed.`);
 				if (!existing.session) throw new Error(`Agent ${params.resume} has no active session.`);
+				if (existing.status === "running") throw new Error(`Agent ${params.resume} is already running.`);
+				let resolveResumeDone!: () => void;
+				existing.done = new Promise<void>((resolve) => {
+					resolveResumeDone = resolve;
+				});
 				existing.status = "running";
+				existing.error = undefined;
+				const abortResume = () => {
+					if ((existing as AgentRun).status !== "running") return;
+					existing.status = "aborted";
+					existing.session?.abort().catch(() => {});
+				};
+				signal?.addEventListener("abort", abortResume, { once: true });
+				if (signal?.aborted) abortResume();
 				push(`resuming ${existing.type}`);
 				renderStatus();
 				try {
+					if ((existing as AgentRun).status === "aborted") throw new Error("Sub-agent aborted.");
 					await existing.session.prompt(params.prompt);
+					if ((existing as AgentRun).status === "aborted") throw new Error("Sub-agent aborted.");
+					const text = extractFinalText(existing.session.messages as unknown as { role: string; content: unknown }[]);
+					existing.finalText = text;
+					existing.status = "completed";
+					return { content: [{ type: "text", text: text || "(sub-agent returned no final text)" }], details: { agent_id: existing.id, resumed: true } };
 				} catch (error) {
+					if ((existing as AgentRun).status === "aborted") throw new Error("Sub-agent aborted.");
 					existing.status = "errored";
 					existing.error = (error as Error).message;
-					renderStatus();
 					throw new Error(`Sub-agent error: ${existing.error}`);
+				} finally {
+					signal?.removeEventListener("abort", abortResume);
+					resolveResumeDone();
+					renderStatus();
 				}
-				const text = extractFinalText(existing.session.messages as unknown as { role: string; content: unknown }[]);
-				existing.finalText = text;
-				existing.status = "completed";
-				renderStatus();
-				return { content: [{ type: "text", text: text || "(sub-agent returned no final text)" }], details: { agent_id: existing.id, resumed: true } };
 			}
 
 			// Background dispatch: return an agent ID immediately, run concurrently.
@@ -1064,6 +1230,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		description: "Retrieve the status and final result of a background or completed sub-agent by its agent ID.",
 		parameters: GetResultParameters,
 		async execute(_id, params) {
+			if (!subagentsEnabled()) throw new Error("Sub-agents are disabled for this session.");
 			const { text } = await getResult(params as { agent_id: string; wait?: boolean; verbose?: boolean });
 			return { content: [{ type: "text", text }], details: {} };
 		},
@@ -1075,15 +1242,59 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
 		description: "Send a steering message to a running sub-agent by its agent ID.",
 		parameters: SteerParameters,
 		async execute(_id, params) {
+			if (!subagentsEnabled()) throw new Error("Sub-agents are disabled for this session.");
 			const { text } = await steer(params as { agent_id: string; message: string });
 			return { content: [{ type: "text", text }], details: {} };
 		},
 	});
 
 	pi.registerCommand("agents", {
-		description: "List registered sub-agent types (built-in + discovered) and any load diagnostics",
-		async handler(_args, ctx) {
+		description: "Manage sub-agents for this session: list | status | on | off",
+		getArgumentCompletions(prefix: string) {
+			const items = ["list", "status", "on", "off"]
+				.filter((value) => value.startsWith(prefix))
+				.map((value) => ({ value, label: value }));
+			return items.length ? items : null;
+		},
+		async handler(args, ctx) {
+			const sub = args.trim().toLowerCase() || "list";
+			if (sub === "off") {
+				if (sessionEnabled) {
+					restoreTools = pi.getActiveTools().filter((tool) => (DISPATCH_TOOL_NAMES as readonly string[]).includes(tool));
+				}
+				sessionEnabled = false;
+				applySessionToolSetting();
+				persistSessionSetting();
+				const aborted = abortActiveRuns();
+				renderStatus();
+				ctx.ui.notify(`Sub-agents disabled for this session${aborted ? `; aborted ${aborted} active run${aborted === 1 ? "" : "s"}` : ""}`, "info");
+				return;
+			}
+			if (sub === "on") {
+				if (!cfg.enabled) {
+					ctx.ui.notify("Sub-agents are disabled by PI_HARNESS_DISABLE_SUBAGENTS.", "warning");
+					return;
+				}
+				sessionEnabled = true;
+				pi.setActiveTools(updateSubagentTools(pi.getActiveTools(), true, restoreTools));
+				persistSessionSetting();
+				await refreshRegistry(ctx);
+				renderStatus();
+				ctx.ui.notify("Sub-agents enabled for this session", "info");
+				return;
+			}
+			if (sub === "status") {
+				const state = !cfg.enabled ? "off (environment)" : sessionEnabled ? "on" : "off (session)";
+				ctx.ui.notify(`Sub-agents: ${state}\nActive runs: ${countActiveRuns(runs.values())}`, "info");
+				return;
+			}
+			if (sub !== "list") {
+				ctx.ui.notify("Usage: /agents [list|status|on|off]", "warning");
+				return;
+			}
+			const state = !cfg.enabled ? "off (environment)" : sessionEnabled ? "on" : "off (session)";
 			const body = [
+				`Sub-agents: ${state}`,
 				`Registered agents (${registry.length}):`,
 				...registry.map((a) => `- ${a.name} [${a.source.scope}] — ${a.description.split("\n")[0]}`),
 			];
