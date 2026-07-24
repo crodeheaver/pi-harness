@@ -24,12 +24,14 @@
       "./extensions/anthropic-subscription.ts",
       "./extensions/structured-question.ts",
       "./extensions/presets.ts",
+      "./extensions/aliases.ts",
       "./extensions/profiles.ts",
       "./extensions/status.ts",
       "./extensions/web-fetch.ts",
       "./extensions/tasks.ts",
       "./extensions/memory.ts",
-      "./extensions/subagents.ts"
+      "./extensions/subagents.ts",
+      "./extensions/mcp.ts"
     ],
     "skills": ["./skills"],
     "prompts": ["./prompts"]

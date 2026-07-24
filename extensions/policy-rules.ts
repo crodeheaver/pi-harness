@@ -33,7 +33,7 @@ const CONFIRM_COMMANDS: Array<[RegExp, string, string]> = [
 	[/\b(?:kill|killall|pkill|taskkill|Stop-Process)\b/i, "process-termination", "terminates processes"],
 ];
 
-const READ_ONLY_CUSTOM_TOOLS = new Set(["ask_user", "web_fetch", "task", "todo", "subagent", "get_subagent_result", "steer_subagent"]);
+const READ_ONLY_CUSTOM_TOOLS = new Set(["ask_user", "web_fetch", "task", "todo", "subagent", "get_subagent_result", "steer_subagent", "list_mcp_resources", "read_mcp_resource"]);
 /**
  * First-party harness tools that may mutate state but are audited as part of
  * the harness, so they are trusted without per-call approval in unrestricted

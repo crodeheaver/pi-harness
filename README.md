@@ -10,6 +10,7 @@ A small, auditable safety and workflow layer for [Pi](https://pi.dev). It adds p
 - **Safety policy** — blocks direct `write`/`edit` calls outside the workspace and to `.git`, `node_modules`, secret files, and private keys; gates sensitive reads and consequential shell commands.
 - **Anthropic subscription status** — shows whether the selected Anthropic model uses Pi's stored Pro/Max OAuth and can fail closed instead of using metered API credentials.
 - **Harness modes** — `/mode inspect|plan|default|permissive|yolo|isolated`.
+- **Command aliases** — `/clear` starts a new session, same as the built-in `/new`.
 - **Task profiles** — `/profile [name]` hot-swaps one trusted project profile from `./pi`.
 - **`ask_user` tool** — one structured question with an optional free-form answer.
 - **Status** — footer indicators for the active mode and policy approvals/blocks.
@@ -17,6 +18,7 @@ A small, auditable safety and workflow layer for [Pi](https://pi.dev). It adds p
 - **Task ledger** — a compact, branch-aware task tool and widget for genuinely multi-step work.
 - **Auto-memory** — Claude Code–style persistent project memory: durable context is saved to `.pi/memory/` as Markdown, the head of `MEMORY.md` is injected into the system prompt each turn, and the agent proactively saves facts worth keeping. Manage it with `/memory`.
 - **Sub-agents** — Claude Code–style sub-agent framework: dispatch isolated, specialized agents (`general-purpose`, `Explore`, `Plan`, or custom `.pi/agents/*.md` definitions) that run in their own context and return only a summary; foreground, background (`run_in_background`), fork (`inherit_context`), resume, and steer. Every sub-agent tool call honors the harness safety policy. Manage or disable them for the current session with `/agents`.
+- **MCP servers** — Claude Code–style Model Context Protocol integration: connect stdio, streamable HTTP, and legacy SSE servers from `.mcp.json`-compatible configs at user/project/local scope; server tools are exposed as `mcp__<server>__<tool>`, server prompts as `/mcp__<server>__<prompt>` commands, and resources through `list_mcp_resources`/`read_mcp_resource`. Project servers require one-time approval; every MCP tool call is approval-gated by the safety policy. Manage with `/mcp`.
 - **Plan approval** — plan mode restricts writes to one selected plan file until explicit review and approval.
 
 ### Skills
@@ -303,6 +305,59 @@ Configuration:
 | `PI_HARNESS_SUBAGENT_MAX_DEPTH` | `5` | Nesting depth cap |
 | `PI_HARNESS_SUBAGENT_MAX_CONCURRENCY` | `5` | Max concurrent background sub-agents |
 | `PI_HARNESS_DISABLE_SUBAGENTS` | unset | `1` disables the feature entirely |
+
+## MCP servers
+
+The harness ports Claude Code's MCP (Model Context Protocol) integration. Servers are configured in Claude Code-compatible `{"mcpServers": {...}}` documents at three scopes, merged with the same whole-entry precedence (local > project > user):
+
+| Scope | File | Shared | Notes |
+| --- | --- | --- | --- |
+| local | `.pi/mcp.local.json` | no (keep out of VCS) | trusted projects only; one-time approval |
+| project | `.mcp.json` at the project root | yes, via version control | trusted projects only; one-time approval; Claude Code reads the same file |
+| user | `~/.pi/agent/mcp.json` | no | all projects; no approval prompt |
+
+Supported transports: `stdio` (spawned subprocess; inferred when `command` is present), `http` (streamable HTTP; `streamable-http` accepted as an alias), and deprecated `sse`. An entry with a `url` but no `type` is a configuration error, and `ws` is not supported. `${VAR}` and `${VAR:-default}` expand in `command`, `args`, `env`, `url`, and `headers`; unset variables warn and stay literal. Remote authentication is header-based (for example `"headers": {"Authorization": "Bearer ${TOKEN}"}`); the OAuth browser flow is not implemented. Stdio servers receive `PI_HARNESS_PROJECT_DIR` and, for compatibility with servers written for Claude Code, `CLAUDE_PROJECT_DIR`.
+
+```json
+{
+  "mcpServers": {
+    "github": { "type": "http", "url": "https://api.githubcopilot.com/mcp/", "headers": { "Authorization": "Bearer ${GITHUB_PAT}" } },
+    "db": { "command": "npx", "args": ["-y", "airtable-mcp-server"], "env": { "AIRTABLE_API_KEY": "${AIRTABLE_API_KEY}" }, "timeout": 30000 }
+  }
+}
+```
+
+What servers contribute:
+
+- **Tools** appear to the LLM as `mcp__<server>__<tool>` (characters outside `A-Za-z0-9_-` become `_`). In default mode every call is approval-gated (`mcp-operation` category, per-tool session approvals); inspect/plan block them; permissive/yolo allow them. Tool errors are surfaced as failed tool calls; results are truncated at ~`MAX_MCP_OUTPUT_TOKENS` (25000) estimated tokens. `tools/list_changed` notifications refresh the tool set live.
+- **Prompts** register as `/mcp__<server>__<prompt>` commands taking positional arguments; the fetched prompt is sent as a user message.
+- **Resources** enable the read-only `list_mcp_resources` / `read_mcp_resource` tools (usable even in inspect/plan modes).
+
+Project-scope servers (`.mcp.json`, `.pi/mcp.local.json`) prompt once for approval; the choice is pinned to a hash of the server config in `~/.pi/agent/mcp-approvals.json` and re-asked when the config changes. Failed remote connections retry with exponential backoff (5 attempts); stdio servers are not auto-restarted. Servers connect in the background in interactive sessions and are awaited before the first turn in print/JSON mode.
+
+Manage servers with `/mcp`:
+
+```
+/mcp                              # status card for all servers
+/mcp get <name>                   # one server with its config
+/mcp add --transport http notion https://mcp.notion.com/mcp
+/mcp add --scope user --env KEY=v airtable -- npx -y airtable-mcp-server
+/mcp add-json weather '{"type":"http","url":"https://api.example.com/mcp"}'
+/mcp remove <name> [--scope local|project|user]
+/mcp reload [name]                # reconnect
+/mcp reset-project-choices        # forget project-server approvals
+```
+
+Configuration:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MCP_TIMEOUT` | `30000` | Server startup/handshake timeout (ms) |
+| `MCP_TOOL_TIMEOUT` | `600000` | Per tool-call timeout (ms); a per-server `timeout` field ≥ 1000 overrides it |
+| `MAX_MCP_OUTPUT_TOKENS` | `25000` | Estimated-token cap on tool output |
+| `PI_HARNESS_MCP_ENABLE_ALL_PROJECT_SERVERS` | unset | `1` auto-approves project-scope servers (CI/headless) |
+| `PI_HARNESS_MCP_USER_CONFIG` | `~/.pi/agent/mcp.json` | Override the user-scope config path |
+| `PI_HARNESS_DISABLE_MCP` | unset | `1` disables the feature entirely |
 
 ## Security limitations
 
